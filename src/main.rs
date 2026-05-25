@@ -1,6 +1,14 @@
 use std::{collections::BTreeMap, path::PathBuf};
 
 use anyhow::{Result, bail};
+use iroh::{
+    Endpoint, EndpointAddr, RelayMode,
+    endpoint::{Connection, presets},
+    protocol::{AcceptError, ProtocolHandler, Router},
+};
+use iroh_tickets::endpoint::EndpointTicket;
+
+const DFSU_SYNC_ALPN: &[u8] = b"/dfsu/sync/0";
 
 #[derive(Debug, PartialEq, Eq)]
 enum Command {
@@ -26,6 +34,31 @@ struct Manifest {
 #[derive(Debug, Default, PartialEq, Eq)]
 struct PullPlan {
     download: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct LocalSyncProtocol {
+    root: PathBuf,
+}
+
+impl ProtocolHandler for LocalSyncProtocol {
+    async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+        let (mut send, mut recv) = connection.accept_bi().await?;
+        let request = recv.read_to_end(1024).await.map_err(AcceptError::from_err)?;
+
+        let response = match request.as_slice() {
+            b"manifest" => format!("manifest {}\n", self.root.display()),
+            _ => "error unknown-request\n".to_string(),
+        };
+
+        send.write_all(response.as_bytes())
+            .await
+            .map_err(AcceptError::from_err)?;
+        send.finish()?;
+        connection.closed().await;
+
+        Ok(())
+    }
 }
 
 fn parse_command(args: &[String]) -> Result<Command> {
@@ -76,18 +109,62 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+async fn local_endpoint() -> Result<Endpoint> {
+    let endpoint = Endpoint::builder(presets::N0)
+        .clear_address_lookup()
+        .clear_ip_transports()
+        .relay_mode(RelayMode::Disabled)
+        .bind_addr("127.0.0.1:0")?
+        .bind()
+        .await?;
+
+    Ok(endpoint)
+}
+
+fn endpoint_invite(addr: EndpointAddr) -> String {
+    EndpointTicket::new(addr).to_string()
+}
+
+fn parse_endpoint_invite(invite: &str) -> Result<EndpointAddr> {
+    let ticket: EndpointTicket = invite.parse()?;
+
+    Ok(ticket.endpoint_addr().clone())
+}
+
+async fn request_remote_manifest(invite: &str) -> Result<String> {
+    let endpoint = local_endpoint().await?;
+    let addr = parse_endpoint_invite(invite)?;
+    let connection = endpoint.connect(addr, DFSU_SYNC_ALPN).await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    send.write_all(b"manifest").await?;
+    send.finish()?;
+
+    let response = recv.read_to_end(1024 * 1024).await?;
+    endpoint.close().await;
+
+    Ok(String::from_utf8(response)?)
+}
+
 async fn init(path: PathBuf) -> Result<()> {
     println!("init {}", path.display());
     Ok(())
 }
 
 async fn serve(path: PathBuf) -> Result<()> {
-    // 1. Load persistent secret key.
-    // 2. Scan `path` into a Manifest.
-    // 3. Import files into an iroh-blobs store.
-    // 4. Start an iroh Router with both dfsu-sync and iroh-blobs ALPNs.
-    // 5. Answer manifest requests from paired peers.
-    println!("serve {}", path.display());
+    let endpoint = local_endpoint().await?;
+    let invite = endpoint_invite(endpoint.addr());
+    let router = Router::builder(endpoint)
+        .accept(DFSU_SYNC_ALPN, LocalSyncProtocol { root: path.clone() })
+        .spawn();
+
+    println!("serving {}", path.display());
+    println!("local invite: {invite}");
+    println!("try: cargo run -- sync {} {invite}", path.display());
+
+    tokio::signal::ctrl_c().await?;
+    router.shutdown().await?;
+
     Ok(())
 }
 
@@ -98,14 +175,11 @@ async fn pair(invite: String) -> Result<()> {
 }
 
 async fn sync(path: PathBuf, peer: String) -> Result<()> {
-    // 1. Load peer address from config.
-    // 2. Scan local folder into a Manifest.
-    // 3. Connect to peer's dfsu-sync protocol.
-    // 4. Request remote Manifest.
-    // 5. Run `plan_pull`.
-    // 6. Download missing hashes through iroh-blobs.
-    // 7. Write files using `safe_relative_path`.
-    println!("sync {} from {peer}", path.display());
+    let remote_manifest = request_remote_manifest(&peer).await?;
+
+    println!("sync {}", path.display());
+    println!("remote: {}", remote_manifest.trim());
+
     Ok(())
 }
 
@@ -197,6 +271,33 @@ mod tests {
         let path = safe_relative_path("notes/todo.md").unwrap();
 
         assert_eq!(path, PathBuf::from("notes").join("todo.md"));
+    }
+
+    #[test]
+    fn endpoint_invites_round_trip() {
+        let addr = EndpointAddr::new(iroh::SecretKey::generate().public());
+        let invite = endpoint_invite(addr.clone());
+
+        assert_eq!(parse_endpoint_invite(&invite).unwrap(), addr);
+    }
+
+    #[tokio::test]
+    async fn local_sync_protocol_returns_manifest_stub() {
+        let endpoint = local_endpoint().await.unwrap();
+        let invite = endpoint_invite(endpoint.addr());
+        let router = Router::builder(endpoint)
+            .accept(
+                DFSU_SYNC_ALPN,
+                LocalSyncProtocol {
+                    root: PathBuf::from("./Sync"),
+                },
+            )
+            .spawn();
+
+        let response = request_remote_manifest(&invite).await.unwrap();
+
+        assert_eq!(response, "manifest ./Sync\n");
+        router.shutdown().await.unwrap();
     }
 
     #[test]
