@@ -4,3 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.102"
+iroh = "0.98.2"
+iroh-blobs = "0.100.0"
+tokio = "1.52.3"
+walkdir = "2.5.0"
+tempfile = "3.17.1"
