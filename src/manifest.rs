@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::File,
+    fs::{self, File},
     io::Read,
     path::{Component, Path, PathBuf},
     time::UNIX_EPOCH,
@@ -189,7 +189,11 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
-fn safe_relative_path(name: &str) -> Result<PathBuf> {
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+pub fn safe_relative_path(name: &str) -> Result<PathBuf> {
     anyhow::ensure!(!name.is_empty(), "relative path must not be empty");
 
     let mut path = PathBuf::new();
@@ -203,6 +207,43 @@ fn safe_relative_path(name: &str) -> Result<PathBuf> {
     }
 
     Ok(path)
+}
+
+pub fn checked_target_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let relative = safe_relative_path(name)?;
+
+    Ok(root.join(relative))
+}
+
+pub fn write_verified_file(
+    root: &Path,
+    name: &str,
+    bytes: &[u8],
+    expected_hash: &str,
+) -> Result<()> {
+    let actual_hash = hash_bytes(bytes);
+    anyhow::ensure!(
+        actual_hash == expected_hash,
+        "hash mismatch for {name}: expected {expected_hash}, got {actual_hash}"
+    );
+
+    let root = root.canonicalize()?;
+    let target = checked_target_path(&root, name)?;
+
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+        let parent = parent.canonicalize()?;
+        anyhow::ensure!(parent.starts_with(&root), "target parent escapes sync root");
+    }
+
+    if target.exists() {
+        let target = target.canonicalize()?;
+        anyhow::ensure!(target.starts_with(&root), "target file escapes sync root");
+    }
+
+    fs::write(target, bytes)?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -294,5 +335,32 @@ mod tests {
         let err = safe_relative_path("notes/../secret.txt").unwrap_err();
 
         assert!(err.to_string().contains("unsafe path component"));
+    }
+
+    #[test]
+    fn writes_verified_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = b"hello";
+
+        write_verified_file(
+            dir.path(),
+            "notes/todo.md",
+            bytes,
+            &blake3::hash(bytes).to_hex().to_string(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            std::fs::read(dir.path().join("notes/todo.md")).unwrap(),
+            bytes
+        );
+    }
+
+    #[test]
+    fn rejects_hash_mismatch_when_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = write_verified_file(dir.path(), "notes/todo.md", b"hello", "wrong").unwrap_err();
+
+        assert!(err.to_string().contains("hash mismatch"));
     }
 }

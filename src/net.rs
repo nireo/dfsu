@@ -1,4 +1,7 @@
-use std::path::PathBuf;
+use std::{
+    path::{Path, PathBuf},
+    str,
+};
 
 use anyhow::{Result, bail};
 use iroh::{
@@ -8,9 +11,10 @@ use iroh::{
 };
 use iroh_tickets::endpoint::EndpointTicket;
 
-use crate::manifest::Manifest;
+use crate::manifest::{Manifest, checked_target_path};
 
 const DFSU_SYNC_ALPN: &[u8] = b"/dfsu/sync/0";
+const MAX_FILE_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 struct LocalSyncProtocol {
@@ -25,14 +29,12 @@ impl ProtocolHandler for LocalSyncProtocol {
             .await
             .map_err(AcceptError::from_err)?;
 
-        let response = match request.as_slice() {
-            b"manifest" => Manifest::from_scan(&self.root)
-                .and_then(|manifest| manifest.to_wire())
-                .unwrap_or_else(|err| format!("error\t{err}\n")),
-            _ => "error\tunknown request\n".to_string(),
+        let response = match response_for_request(&self.root, &request) {
+            Ok(response) => response,
+            Err(err) => format!("error\t{err}\n").into_bytes(),
         };
 
-        send.write_all(response.as_bytes())
+        send.write_all(&response)
             .await
             .map_err(AcceptError::from_err)?;
         send.finish()?;
@@ -40,6 +42,34 @@ impl ProtocolHandler for LocalSyncProtocol {
 
         Ok(())
     }
+}
+
+fn response_for_request(root: &Path, request: &[u8]) -> Result<Vec<u8>> {
+    match request {
+        b"manifest" => Manifest::from_scan(root)
+            .and_then(|manifest| manifest.to_wire())
+            .map(String::into_bytes),
+        request if request.starts_with(b"get\t") => {
+            let name = str::from_utf8(&request[4..])?;
+            let path = readable_file_path(root, name)?;
+            let bytes = std::fs::read(path)?;
+            let mut response = format!("file\t{}\n", bytes.len()).into_bytes();
+            response.extend_from_slice(&bytes);
+            Ok(response)
+        }
+        _ => bail!("unknown request"),
+    }
+}
+
+fn readable_file_path(root: &Path, name: &str) -> Result<PathBuf> {
+    let root = root.canonicalize()?;
+    let path = checked_target_path(&root, name)?;
+    let path = path.canonicalize()?;
+
+    anyhow::ensure!(path.starts_with(&root), "file escapes sync root");
+    anyhow::ensure!(path.is_file(), "not a file: {name}");
+
+    Ok(path)
 }
 
 async fn local_endpoint() -> Result<Endpoint> {
@@ -100,6 +130,42 @@ pub async fn request_remote_manifest(invite: &str) -> Result<Manifest> {
     Manifest::from_wire(&response)
 }
 
+pub async fn request_remote_file(invite: &str, name: &str) -> Result<Vec<u8>> {
+    let endpoint = local_endpoint().await?;
+    let addr = parse_endpoint_invite(invite)?;
+    let connection = endpoint.connect(addr, DFSU_SYNC_ALPN).await?;
+    let (mut send, mut recv) = connection.open_bi().await?;
+
+    send.write_all(format!("get\t{name}").as_bytes()).await?;
+    send.finish()?;
+
+    let response = recv.read_to_end(MAX_FILE_RESPONSE_BYTES).await?;
+    endpoint.close().await;
+
+    file_response_payload(&response)
+}
+
+fn file_response_payload(response: &[u8]) -> Result<Vec<u8>> {
+    if response.starts_with(b"error\t") {
+        let error = String::from_utf8_lossy(&response[6..]);
+        bail!("peer error: {}", error.trim());
+    }
+
+    let Some(header_end) = response.iter().position(|byte| *byte == b'\n') else {
+        bail!("missing file response header");
+    };
+    let header = str::from_utf8(&response[..header_end])?;
+    let Some(size) = header.strip_prefix("file\t") else {
+        bail!("invalid file response header");
+    };
+    let size = size.parse::<usize>()?;
+    let payload = &response[header_end + 1..];
+
+    anyhow::ensure!(payload.len() == size, "file response size mismatch");
+
+    Ok(payload.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +197,28 @@ mod tests {
         let manifest = request_remote_manifest(&invite).await.unwrap();
 
         assert!(manifest.files.contains_key("a.txt"));
+        router.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn local_sync_protocol_returns_file_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+
+        let endpoint = local_endpoint().await.unwrap();
+        let invite = endpoint_invite(endpoint.addr());
+        let router = Router::builder(endpoint)
+            .accept(
+                DFSU_SYNC_ALPN,
+                LocalSyncProtocol {
+                    root: dir.path().to_path_buf(),
+                },
+            )
+            .spawn();
+
+        let bytes = request_remote_file(&invite, "a.txt").await.unwrap();
+
+        assert_eq!(bytes, b"hello");
         router.shutdown().await.unwrap();
     }
 }

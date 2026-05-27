@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::{cli::Command, manifest::Manifest};
+use crate::{
+    cli::Command,
+    manifest::{Manifest, write_verified_file},
+};
 
 mod cli;
 mod manifest;
@@ -24,6 +27,7 @@ async fn pair(invite: String) -> Result<()> {
 }
 
 async fn sync(path: PathBuf, peer: String) -> Result<()> {
+    std::fs::create_dir_all(&path)?;
     let local_manifest = Manifest::from_scan(&path)?;
     let remote_manifest = net::request_remote_manifest(&peer).await?;
     let plan = local_manifest.plan_pull(&remote_manifest);
@@ -31,6 +35,13 @@ async fn sync(path: PathBuf, peer: String) -> Result<()> {
     println!("sync {}", path.display());
     println!("remote files: {}", remote_manifest.files.len());
     println!("files to download: {}", plan.download.len());
+
+    for name in plan.download {
+        let entry = &remote_manifest.files[&name];
+        let bytes = net::request_remote_file(&peer, &name).await?;
+        write_verified_file(&path, &name, &bytes, &entry.hash)?;
+        println!("downloaded {name}");
+    }
 
     Ok(())
 }
