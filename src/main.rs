@@ -11,6 +11,7 @@ mod cli;
 mod identity;
 mod manifest;
 mod net;
+mod peers;
 
 async fn init(path: PathBuf) -> Result<()> {
     let secret_key = identity::load_or_create_secret_key()?;
@@ -24,16 +25,20 @@ async fn serve(path: PathBuf) -> Result<()> {
     net::serve_local(path).await
 }
 
-async fn pair(invite: String) -> Result<()> {
-    // MVP: parse a one-time invite and store peer node id + last known address.
-    println!("pair {invite}");
+async fn pair(name: String, invite: String) -> Result<()> {
+    let peers = peers::PeerStore::open()?;
+    peers.save(&name, &invite)?;
+
+    println!("paired {name}");
     Ok(())
 }
 
 async fn sync(path: PathBuf, peer: String) -> Result<()> {
+    let peers = peers::PeerStore::open()?;
+    let invite = peers.resolve(&peer)?;
     std::fs::create_dir_all(&path)?;
     let local_manifest = Manifest::from_scan(&path)?;
-    let remote_manifest = net::request_remote_manifest(&peer).await?;
+    let remote_manifest = net::request_remote_manifest(&invite).await?;
     let plan = local_manifest.plan_pull(&remote_manifest);
 
     println!("sync {}", path.display());
@@ -42,7 +47,7 @@ async fn sync(path: PathBuf, peer: String) -> Result<()> {
 
     for name in plan.download {
         let entry = &remote_manifest.files[&name];
-        let bytes = net::request_remote_file(&peer, &name).await?;
+        let bytes = net::request_remote_file(&invite, &name).await?;
         write_verified_file(&path, &name, &bytes, &entry.hash)?;
         println!("downloaded {name}");
     }
@@ -57,7 +62,7 @@ async fn main() -> Result<()> {
     match cli::parse_command(&args)? {
         Command::Init { path } => init(path).await,
         Command::Serve { path } => serve(path).await,
-        Command::Pair { invite } => pair(invite).await,
+        Command::Pair { name, invite } => pair(name, invite).await,
         Command::Sync { path, peer } => sync(path, peer).await,
     }
 }

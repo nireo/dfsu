@@ -116,7 +116,8 @@ pub async fn serve_local(path: PathBuf) -> Result<()> {
 
     println!("serving {}", path.display());
     println!("local invite: {invite}");
-    println!("try: cargo run -- sync {} {invite}", path.display());
+    println!("try: cargo run -- pair local {invite}");
+    println!("then: cargo run -- sync {} local", path.display());
 
     tokio::signal::ctrl_c().await?;
     router.shutdown().await?;

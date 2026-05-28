@@ -13,7 +13,7 @@ pub fn load_or_create_secret_key() -> Result<SecretKey> {
     load_or_create_secret_key_at(config_dir()?.join(SECRET_FILE))
 }
 
-fn config_dir() -> Result<PathBuf> {
+pub fn config_dir() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("DFSU_CONFIG_DIR") {
         return Ok(PathBuf::from(path));
     }

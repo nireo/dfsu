@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 pub enum Command {
     Init { path: PathBuf },
     Serve { path: PathBuf },
-    Pair { invite: String },
+    Pair { name: String, invite: String },
     Sync { path: PathBuf, peer: String },
 }
 
@@ -18,7 +18,8 @@ pub fn parse_command(args: &[String]) -> Result<Command> {
         [cmd, path] if cmd == "serve" => Ok(Command::Serve {
             path: PathBuf::from(path),
         }),
-        [cmd, invite] if cmd == "pair" => Ok(Command::Pair {
+        [cmd, name, invite] if cmd == "pair" => Ok(Command::Pair {
+            name: name.clone(),
             invite: invite.clone(),
         }),
         [cmd, path, peer] if cmd == "sync" => Ok(Command::Sync {
@@ -26,7 +27,7 @@ pub fn parse_command(args: &[String]) -> Result<Command> {
             peer: peer.clone(),
         }),
         _ => bail!(
-            "usage: dfsu init <path> | dfsu serve <path> | dfsu pair <invite> | dfsu sync <path> <peer>"
+            "usage: dfsu init <path> | dfsu serve <path> | dfsu pair <name> <invite> | dfsu sync <path> <peer>"
         ),
     }
 }
@@ -48,6 +49,19 @@ mod tests {
             Command::Sync {
                 path: PathBuf::from("./Sync"),
                 peer: "laptop".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parses_pair_command() {
+        let command = parse_command(&args(&["pair", "laptop", "endpointabc"])).unwrap();
+
+        assert_eq!(
+            command,
+            Command::Pair {
+                name: "laptop".to_string(),
+                invite: "endpointabc".to_string(),
             }
         );
     }
