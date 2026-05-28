@@ -8,11 +8,15 @@ use crate::{
 };
 
 mod cli;
+mod identity;
 mod manifest;
 mod net;
 
 async fn init(path: PathBuf) -> Result<()> {
+    let secret_key = identity::load_or_create_secret_key()?;
+
     println!("init {}", path.display());
+    println!("identity {}", secret_key.public());
     Ok(())
 }
 

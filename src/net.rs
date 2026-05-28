@@ -5,13 +5,16 @@ use std::{
 
 use anyhow::{Result, bail};
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode,
+    Endpoint, EndpointAddr, RelayMode, SecretKey,
     endpoint::{Connection, presets},
     protocol::{AcceptError, ProtocolHandler, Router},
 };
 use iroh_tickets::endpoint::EndpointTicket;
 
-use crate::manifest::{Manifest, checked_target_path};
+use crate::{
+    identity,
+    manifest::{Manifest, checked_target_path},
+};
 
 const DFSU_SYNC_ALPN: &[u8] = b"/dfsu/sync/0";
 const MAX_FILE_RESPONSE_BYTES: usize = 1024 * 1024 * 1024;
@@ -72,11 +75,21 @@ fn readable_file_path(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-async fn local_endpoint() -> Result<Endpoint> {
+enum IdentityMode {
+    Persistent,
+    Ephemeral,
+}
+
+async fn local_endpoint(identity_mode: IdentityMode) -> Result<Endpoint> {
+    let secret_key = match identity_mode {
+        IdentityMode::Persistent => identity::load_or_create_secret_key()?,
+        IdentityMode::Ephemeral => SecretKey::generate(),
+    };
     let endpoint = Endpoint::builder(presets::N0)
         .clear_address_lookup()
         .clear_ip_transports()
         .relay_mode(RelayMode::Disabled)
+        .secret_key(secret_key)
         .bind_addr("127.0.0.1:0")?
         .bind()
         .await?;
@@ -95,7 +108,7 @@ fn parse_endpoint_invite(invite: &str) -> Result<EndpointAddr> {
 }
 
 pub async fn serve_local(path: PathBuf) -> Result<()> {
-    let endpoint = local_endpoint().await?;
+    let endpoint = local_endpoint(IdentityMode::Persistent).await?;
     let invite = endpoint_invite(endpoint.addr());
     let router = Router::builder(endpoint)
         .accept(DFSU_SYNC_ALPN, LocalSyncProtocol { root: path.clone() })
@@ -112,7 +125,7 @@ pub async fn serve_local(path: PathBuf) -> Result<()> {
 }
 
 pub async fn request_remote_manifest(invite: &str) -> Result<Manifest> {
-    let endpoint = local_endpoint().await?;
+    let endpoint = local_endpoint(IdentityMode::Ephemeral).await?;
     let addr = parse_endpoint_invite(invite)?;
     let connection = endpoint.connect(addr, DFSU_SYNC_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
@@ -131,7 +144,7 @@ pub async fn request_remote_manifest(invite: &str) -> Result<Manifest> {
 }
 
 pub async fn request_remote_file(invite: &str, name: &str) -> Result<Vec<u8>> {
-    let endpoint = local_endpoint().await?;
+    let endpoint = local_endpoint(IdentityMode::Ephemeral).await?;
     let addr = parse_endpoint_invite(invite)?;
     let connection = endpoint.connect(addr, DFSU_SYNC_ALPN).await?;
     let (mut send, mut recv) = connection.open_bi().await?;
@@ -183,7 +196,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
 
-        let endpoint = local_endpoint().await.unwrap();
+        let endpoint = local_endpoint(IdentityMode::Ephemeral).await.unwrap();
         let invite = endpoint_invite(endpoint.addr());
         let router = Router::builder(endpoint)
             .accept(
@@ -205,7 +218,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.txt"), b"hello").unwrap();
 
-        let endpoint = local_endpoint().await.unwrap();
+        let endpoint = local_endpoint(IdentityMode::Ephemeral).await.unwrap();
         let invite = endpoint_invite(endpoint.addr());
         let router = Router::builder(endpoint)
             .accept(
