@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    fs::{self, File},
+    fs::File,
     io::Read,
     path::{Component, Path, PathBuf},
     time::UNIX_EPOCH,
@@ -189,6 +189,7 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hasher.finalize().to_hex().to_string())
 }
 
+#[cfg(test)]
 pub fn hash_bytes(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
@@ -215,6 +216,7 @@ pub fn checked_target_path(root: &Path, name: &str) -> Result<PathBuf> {
     Ok(root.join(relative))
 }
 
+#[cfg(test)]
 pub fn write_verified_file(
     root: &Path,
     name: &str,
@@ -231,7 +233,7 @@ pub fn write_verified_file(
     let target = checked_target_path(&root, name)?;
 
     if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)?;
         let parent = parent.canonicalize()?;
         anyhow::ensure!(parent.starts_with(&root), "target parent escapes sync root");
     }
@@ -241,7 +243,7 @@ pub fn write_verified_file(
         anyhow::ensure!(target.starts_with(&root), "target file escapes sync root");
     }
 
-    fs::write(target, bytes)?;
+    std::fs::write(target, bytes)?;
 
     Ok(())
 }

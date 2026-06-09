@@ -2,10 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::{
-    cli::Command,
-    manifest::{Manifest, write_verified_file},
-};
+use crate::{cli::Command, manifest::Manifest};
 
 mod cli;
 mod identity;
@@ -47,8 +44,7 @@ async fn sync(path: PathBuf, peer: String) -> Result<()> {
 
     for name in plan.download {
         let entry = &remote_manifest.files[&name];
-        let bytes = net::request_remote_file(&invite, &name).await?;
-        write_verified_file(&path, &name, &bytes, &entry.hash)?;
+        net::download_remote_file(&invite, &name, &path, &entry.hash).await?;
         println!("downloaded {name}");
     }
 
