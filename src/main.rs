@@ -57,9 +57,7 @@ async fn sync(path: PathBuf, peer: String) -> Result<()> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
-
-    match cli::parse_command(&args)? {
+    match cli::parse_command() {
         Command::Init { path } => init(path).await,
         Command::Serve { path } => serve(path).await,
         Command::Pair { name, invite } => pair(name, invite).await,
